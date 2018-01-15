@@ -1,12 +1,15 @@
 package signalr
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
+	"net"
 	"net/http"
 	"net/url"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
@@ -64,14 +67,21 @@ func (self *Client) connectWebsocket(address string, params negotiationResponse,
 
 	var connectionParameters = url.Values{}
 	connectionParameters.Set("transport", "webSockets")
-	connectionParameters.Set("clientProtocol", "1.5")
+	connectionParameters.Set("clientProtocol", "1.3")
 	connectionParameters.Set("connectionToken", params.ConnectionToken)
 	connectionParameters.Set("connectionData", string(connectionDataBytes))
 
 	var connectionUrl = url.URL{Scheme: "wss", Host: address, Path: "signalr/connect"}
 	connectionUrl.RawQuery = connectionParameters.Encode()
+	println(connectionUrl.String())
 
-	if conn, _, err := websocket.DefaultDialer.Dial(connectionUrl.String(), self.RequestHeader); err != nil {
+	//modify by ligang 如果证书不授信 需要忽略
+	dial := websocket.Dialer{
+		Proxy:           http.ProxyFromEnvironment,
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	}
+	if conn, _, err := dial.Dial(connectionUrl.String(), self.RequestHeader); err != nil {
+		//if conn, _, err := websocket.DefaultDialer.Dial(connectionUrl.String(), self.RequestHeader); err != nil {
 		return nil, err
 	} else {
 		return conn, nil
@@ -83,9 +93,26 @@ func (self *Client) negotiate(scheme, address string) (negotiationResponse, erro
 
 	var negotiationUrl = url.URL{Scheme: scheme, Host: address, Path: "/signalr/negotiate"}
 
-	client := &http.Client{}
-
+	client := &http.Client{
+		//modify by ligang 如果证书不授信 需要忽略
+		Transport: &http.Transport{
+			Dial: func(netw, addr string) (net.Conn, error) {
+				deadline := time.Now().Add(3 * time.Second)
+				c, err := net.DialTimeout(netw, addr, time.Second*3)
+				if err != nil {
+					return nil, err
+				}
+				c.SetDeadline(deadline)
+				return c, nil
+			},
+			TLSClientConfig:    &tls.Config{InsecureSkipVerify: true},
+			DisableCompression: true,
+		},
+	}
 	request, err := http.NewRequest("GET", negotiationUrl.String(), nil)
+	if err != nil {
+		panic(err)
+	}
 	for k, values := range self.RequestHeader {
 		for _, val := range values {
 			request.Header.Add(k, val)
@@ -230,7 +257,7 @@ func (self *Client) CallHub(hub, method string, params ...interface{}) (json.Raw
 	if err != nil {
 		return nil, err
 	}
-
+	println(string(data))
 	var responseKey = fmt.Sprintf("%d", request.Identifier)
 	responseChannel, err := self.createResponseFuture(responseKey)
 	if err != nil {
@@ -255,6 +282,7 @@ func (self *Client) CallHub(hub, method string, params ...interface{}) (json.Raw
 func (self *Client) Connect(scheme, host string, hubs []string) error {
 	// Negotiate parameters.
 	if params, err := self.negotiate(scheme, host); err != nil {
+		println("negotiate err:", err)
 		return err
 	} else {
 		self.params = params
@@ -262,6 +290,7 @@ func (self *Client) Connect(scheme, host string, hubs []string) error {
 
 	// Connect Websocket.
 	if ws, err := self.connectWebsocket(host, self.params, hubs); err != nil {
+		println("connectWebsocket err:", err)
 		return err
 	} else {
 		self.socket = ws
